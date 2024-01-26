@@ -11,6 +11,7 @@ import re
 import sys
 import tiers
 import itertools
+from tabulate import tabulate
 from typing import Any, Dict, List, NamedTuple
 import numpy as np
 from scipy.stats.mstats import gmean
@@ -258,6 +259,36 @@ def get_pr_titles(args):
   return [titles, data_labels]
 
 
+def speedup_header(title: str, backend_name: str, args):
+  if args.format == 'tab':
+    return f'Speedup\n{title}\nover\n{args.baseline.capitalize()}\n{backend_name}'
+  return f'Speedup({title}/{args.baseline.capitalize()} {backend_name})'
+
+
+def modelname_header(model: str, args):
+  if args.format == 'tab':
+    return f'ModelName\n{model}'
+  return f'ModelName({model})'
+
+
+def percentile_header(title: str, p: str, args):
+  if args.format == 'tab':
+    return f'{title}\n{p}'
+  return f'{title} {p}'
+
+
+def pr_text(headers, rows, args):
+  if args.format == 'csv':
+    if headers:
+      headers[0] = f'# {headers[0]}'
+    print(','.join(headers))
+    for row in rows:
+      print(','.join([str(f) if f is not None else '' for f in row]))
+  elif args.format == 'tab':
+    print(
+        tabulate(rows, headers=headers, tablefmt='fancy_grid', floatfmt='.2f'))
+
+
 def pr_latest(results_map: Dict[str, Any], args, timestamps: List[str]):
   titles, data_labels = get_pr_titles(args)
   speedups = [[] for _ in titles]
@@ -278,11 +309,13 @@ def pr_latest(results_map: Dict[str, Any], args, timestamps: List[str]):
     logger.warning(f'cannot find data for accelerator {args.accelerator}')
     return
 
-  if args.format == 'csv':
-    print(','.join(['# Workload'] + [
-        f'Speedup({title}/{args.baseline.capitalize()} {base_backend_name}),StdDev,ModelName({title})'
-        for title in titles
-    ]))
+  if args.format == 'csv' or args.format == 'tab':
+    headers = ['Workload'] + [
+        header for title in titles for header in [
+            speedup_header(title, base_backend_name, args), 'StdDev',
+            modelname_header(title, args)
+        ]
+    ]
     # Note: the latest timestamp might not have results for all benchmarks.
     max_len = max([len(l) for l in speedups])
 
@@ -292,16 +325,16 @@ def pr_latest(results_map: Dict[str, Any], args, timestamps: List[str]):
       arr += [val] * (desired_len - len(arr))
 
     for i in range(len(titles)):
-      pad_array(speedups[i], max_len, Datapoint('', ''))
-      pad_array(model_names[i], max_len, '')
+      pad_array(speedups[i], max_len, Datapoint(None, None))
+      pad_array(model_names[i], max_len, None)
 
+    rows = []
     for j in range(max_len):
-      print(','.join(
-          map(str, [j] + [
-              v for i in range(len(titles))
-              for v in (speedups[i][j].avg, speedups[i][j].std,
-                        model_names[i][j])
-          ])))
+      rows += [[j] + [
+          v for i in range(len(titles))
+          for v in (speedups[i][j].avg, speedups[i][j].std, model_names[i][j])
+      ]]
+    pr_text(headers, rows, args)
   else:
     plt.figure(figsize=(args.fig_width, args.fig_height))
     plt.axhline(y=1.0, color='lightgray')
@@ -344,24 +377,24 @@ def pr_histogram(results_map: Dict[str, Any], args, timestamps: List[str]):
   titles, data_labels = get_pr_titles(args)
   percentiles = [f'p{p}' for p in (95, 50, 5)]
   labels = [f'{pfx}:speedups:{p}' for pfx in data_labels for p in percentiles]
-  full_titles = [f'{title} {p}' for title in titles for p in percentiles]
+  full_titles = [
+      percentile_header(title, p, args) for title in titles for p in percentiles
+  ]
   base_backend_name = _title_map[args.backends[0]]
   x = []
   y = [[] for i in range(len(labels))]
   for timestamp in timestamps:
     if labels[0] in results_map[timestamp]:
-      for label in labels:
-        assert label in results_map[timestamp]
       x.append(datetime.utcfromtimestamp(float(timestamp)))
       for i, label in enumerate(labels):
-        y[i].append(
-            pr_round(results_map[timestamp][label] if label in
-                     results_map[timestamp] else Datapoint('', '')).avg)
-  if args.format == 'csv':
-    full_titles = ['# Datetime(UTC)'] + full_titles
-    print(','.join(full_titles))
+        y[i].append((pr_round(results_map[timestamp][label]) if label
+                     in results_map[timestamp] else Datapoint(None, None)).avg)
+  if args.format == 'csv' or args.format == 'tab':
+    headers = ['Datetime(UTC)'] + full_titles
+    rows = []
     for j, utc in enumerate(x):
-      print(','.join([str(utc)] + [str(y[i][j]) for i in range(len(labels))]))
+      rows += [[utc] + [y[i][j] for i in range(len(labels))]]
+    pr_text(headers, rows, args)
   else:
     fig, ax = plt.subplots(figsize=(args.fig_width, args.fig_height))
     ax.axhline(y=1.0, color='lightgray')
@@ -401,17 +434,19 @@ def pr_gmean(results_map: Dict[str, Any], args, timestamps: List[str]):
     for i, label in enumerate(labels):
       y[i].append(
           pr_round(results_map[timestamp][label]) if label in
-          results_map[timestamp] else Datapoint('', ''))
-  if args.format == 'csv':
-    print(','.join(['# Datetime(UTC)'] + [
-        f"Speedup({title}/{args.baseline.capitalize()} {base_backend_name}),StdDev"
-        for title in titles
-    ]))
+          results_map[timestamp] else Datapoint(None, None))
+  if args.format == 'csv' or args.format == 'tab':
+    headers = ['Datetime(UTC)'] + [
+        header for title in titles for header in
+        [speedup_header(title, base_backend_name, args), 'StdDev']
+    ]
+    rows = []
     for j, x in enumerate(x):
-      print(','.join(
-          map(str, [x] + [
-              v for i in range(len(labels)) for v in (y[i][j].avg, y[i][j].std)
-          ])))
+      rows += [
+          [x] +
+          [v for i in range(len(labels)) for v in (y[i][j].avg, y[i][j].std)]
+      ]
+    pr_text(headers, rows, args)
   else:
     fig, ax = plt.subplots(figsize=(args.fig_width, args.fig_height))
     ax.axhline(y=1.0, color='lightgray')
@@ -513,7 +548,7 @@ def parse_args(args=None):
   parser.add_argument(
       "--format",
       default='csv',
-      choices=['csv', 'png', 'svg'],
+      choices=['csv', 'png', 'svg', 'tab'],
       help='Output format')
   parser.add_argument('input_file', nargs='+')
   parser.add_argument(
